@@ -1,7 +1,14 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class BitrixSettings(BaseSettings):
+    base_url: str
+    id_user: int
+    key_201: str
 
+    timeout: float = 30.0
+    max_retries: int = 3
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 30.0
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="BITRIX_", extra="ignore")
 
