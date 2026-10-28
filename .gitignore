@@ -1,0 +1,18 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+SABY_AUTH_CURRENT.md
+SABY_REPORTING_API.md
+TZ_SABY_REPORTING_STATUS_SYNC.md
+task.md
+.codegraph
+.idea
+plan.md
+.env
