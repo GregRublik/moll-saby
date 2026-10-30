@@ -372,7 +372,11 @@ class BitrixService:
                 raise last_error
 
             if status >= 400:
-                raise BitrixError(f"{method}: HTTP {status}")
+                detail = ""
+                if isinstance(body, dict):
+                    detail = str(body.get("error_description") or "")
+                suffix = f": {detail}" if detail else ""
+                raise BitrixError(f"{method}: HTTP {status}{suffix}")
 
             if not isinstance(body, dict) or "result" not in body:
                 raise BitrixError(f"{method}: неожиданный формат ответа")

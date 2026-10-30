@@ -49,6 +49,9 @@ class SabyEvent:
     event_time: datetime | None
     event_name: str | None
     event_group: str | None
+    event_group_code: str | None
+    event_description: str | None
+    document_title: str | None
     document_date: datetime | None
     document_type: str | None
     note: str | None
@@ -386,6 +389,16 @@ class SabyService:
         organization = (document.get("НашаОрганизация") or {}).get("СвЮЛ") or {}
         event_uuid = str(event.get("Идентификатор"))
 
+        group = event.get("Группа") or {}
+        if isinstance(group, dict):
+            event_group = self._str_or_none(group.get("Название"))
+            event_group_code = self._str_or_none(group.get("Код"))
+            event_description = self._str_or_none(group.get("Описание"))
+        else:
+            event_group = self._str_or_none(group)
+            event_group_code = None
+            event_description = None
+
         try:
             event_time = self.parse_datetime(event.get("ДатаВремя"))
         except ValueError:
@@ -405,7 +418,10 @@ class SabyService:
             event_uuid=event_uuid,
             event_time=event_time,
             event_name=self._str_or_none(event.get("Название")),
-            event_group=self._str_or_none(event.get("Группа")),
+            event_group=event_group,
+            event_group_code=event_group_code,
+            event_description=event_description,
+            document_title=self._str_or_none(document.get("Название")),
             document_date=document_date,
             document_type=self._str_or_none(document.get("Тип")),
             note=self._str_or_none(document.get("Примечание")),
