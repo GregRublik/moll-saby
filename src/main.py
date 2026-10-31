@@ -20,28 +20,44 @@ logger = logging.getLogger(__name__)
 MSK = ZoneInfo("Europe/Moscow")
 MIN_DT = datetime.min.replace(tzinfo=MSK)
 
+# Saby показывает периоды так: "Янв'26", "Март'26", "Сент'26", "III кв'26",
+# "2025". Формат проверен по `Примечание` 35 отчётов за 2025 год и совпадает
+# с примером периода в карточке Bitrix («Июль'26»).
 MONTH_NAMES = (
-    "Январь",
-    "Февраль",
+    "Янв",
+    "Фев",
     "Март",
-    "Апрель",
+    "Апр",
     "Май",
     "Июнь",
     "Июль",
-    "Август",
-    "Сентябрь",
-    "Октябрь",
-    "Ноябрь",
-    "Декабрь",
+    "Авг",
+    "Сент",
+    "Окт",
+    "Ноя",
+    "Дек",
 )
 
-# Подтверждённые соответствия из ТЗ. Новые строки добавлять только после
-# согласования с бухгалтерией; неизвестные значения уходят в исключения.
-FORM_BY_TYPE_SUBTYPE: dict[tuple[str, str], int] = {
-    ("ОтчетФНС", "1151162"): 22050,
+QUARTER_NAMES: dict[int, str] = {
+    21: "I кв",
+    22: "II кв",
+    23: "III кв",
+    24: "IV кв",
 }
-RECIPIENT_BY_TYPE: dict[str, int] = {
-    "ОтчетФНС": 3601,
+ANNUAL_PERIOD_CODE = 34
+
+# Saby менял название отчёта между версиями. Синонимы нужны только для
+# точного сравнения с названием формы в Bitrix; нечёткого поиска нет.
+REPORT_TITLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "Уведомление ЕНП": ("Уведомление о налогах для ЕНП",),
+    "Уведомление о налогах для ЕНП": ("Уведомление ЕНП",),
+}
+
+# Резервное соответствие для полей-справочников, если Bitrix не вернул
+# названия элементов инфоблока. Новые строки добавлять только после
+# согласования с бухгалтерией; неизвестные значения уходят в исключения.
+FORM_ID_BY_TYPE_SUBTYPE: dict[tuple[str, str], int] = {
+    ("ОтчетФНС", "1151162"): 22050,
 }
 
 
@@ -65,6 +81,9 @@ class Report:
     number_sent: str | None
     number_correction: str | None
     events: list[SabyEvent] = field(repr=False)
+    recipient_name: str | None = None
+    recipient_inn: str | None = None
+    recipient_kpp: str | None = None
     fact_date: datetime | None = None
     submitted: bool = False
 
@@ -143,6 +162,9 @@ def build_reports(events: Sequence[SabyEvent]) -> list[Report]:
             number_sent=latest.number_sent,
             number_correction=latest.number_correction,
             events=report_events,
+            recipient_name=latest.recipient_name,
+            recipient_inn=latest.recipient_inn,
+            recipient_kpp=latest.recipient_kpp,
         )
         report.fact_date = _positive_protocol_date(report_events)
         report.submitted = report.state_code == "7"
@@ -203,7 +225,6 @@ async def load_bitrix_context(bitrix: BitrixService) -> BitrixContext:
     required = (
         settings.bitrix.form_field,
         settings.bitrix.period_field,
-        settings.bitrix.recipient_field,
     )
     missing = [name for name in required if not name or name not in fields]
     form_ready = not missing
@@ -262,7 +283,7 @@ def find_candidates(
     report: Report,
     context: BitrixContext,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Ищет карточку по сохранённой связи или по точному составному ключу."""
+    """Ищет карточку по сохранённой связи или по названию отчёта и периоду."""
     uuid_field = settings.bitrix.saby_uuid_field
     if context.uuid_ready and uuid_field:
         exact = [
@@ -283,51 +304,175 @@ def find_candidates(
     if key is None:
         return [], reason or "не удалось построить ключ сопоставления"
 
-    form_id, recipient_id, period = key
-    candidates = [
-        item
-        for item in context.items
-        if _same_simple(item.get(settings.bitrix.form_field), form_id)
-        and _same_simple(item.get(settings.bitrix.recipient_field), recipient_id)
-        and _same_simple(item.get(settings.bitrix.period_field), period)
-    ]
+    title, period = key
+    form_field = settings.bitrix.form_field or ""
+    period_field = settings.bitrix.period_field or ""
+    form_names = _field_item_names(context.fields.get(form_field) or {})
+    titles = _title_variants(title)
+    legacy_form_id = FORM_ID_BY_TYPE_SUBTYPE.get(
+        (report.document_type or "", report.subtype or "")
+    )
+
+    def matches(item: dict[str, Any]) -> bool:
+        if not _same_simple(item.get(period_field), period):
+            return False
+        if _form_matches(item.get(form_field), titles, form_names):
+            return True
+        # Если Bitrix не вернул названия элементов справочника, используем
+        # проверенное соответствие тип/подтип → ID формы.
+        if not form_names and legacy_form_id is not None:
+            return _same_simple(item.get(form_field), legacy_form_id)
+        return False
+
+    candidates = [item for item in context.items if matches(item)]
+    if len(candidates) > 1:
+        narrowed = _narrow_by_recipient(report, candidates, context)
+        if narrowed is None:
+            # Получатель в Bitrix не настроен — оставляем неоднозначность,
+            # чтобы _resolve_item сообщил о нескольких кандидатах.
+            return candidates, None
+        if not narrowed:
+            return [], (
+                "несколько кандидатов по названию/периоду; "
+                f"получатель Saby {report.recipient_name!r} "
+                "не совпал с полем Bitrix"
+            )
+        candidates = narrowed
+    if not candidates:
+        return [], (
+            "кандидат не найден по ключу: "
+            f"название={title!r}, период={period!r}"
+        )
     return candidates, None
 
 
-def _match_key(report: Report) -> tuple[tuple[int, int, str] | None, str | None]:
-    if not report.document_type or not report.subtype:
-        return None, "в отчёте нет типа/подтипа Saby"
+def _match_key(report: Report) -> tuple[tuple[str, str] | None, str | None]:
+    """Ключ сопоставления: название отчёта + название периода.
 
-    form_id = FORM_BY_TYPE_SUBTYPE.get((report.document_type, report.subtype))
-    if form_id is None:
-        return None, (
-            f"нет соответствия формы для {report.document_type}/{report.subtype}"
-        )
-
-    recipient_id = RECIPIENT_BY_TYPE.get(report.document_type)
-    if recipient_id is None:
-        return None, f"нет получателя для типа {report.document_type}"
+    Год входит в название периода: «Июль'26», «III кв'26», «2025».
+    """
+    title = (report.title or "").strip()
+    if not title:
+        return None, "в отчёте нет названия (document_title)"
 
     period = _period_label(report.year, report.period_code)
     if period is None:
         return None, (
-            f"нет соответствия периода для {report.year}/{report.period_code}"
+            f"нет названия периода для {report.year!r}/{report.period_code!r} "
+            f"(отчёт {title!r})"
         )
 
-    return (form_id, recipient_id, period), None
+    return (title, period), None
 
 
 def _period_label(year: str | None, period_code: str | None) -> str | None:
+    """Код периода Saby → название периода в формате Bitrix.
+
+    1–12  → «Янв'26» … «Дек'26»
+    21–24 → «I кв'26» … «IV кв'26»
+    34    → «2025» (год)
+    """
     if not year or not period_code:
         return None
     try:
         year_int = int(year)
-        month = int(period_code)
+        code = int(period_code)
     except (TypeError, ValueError):
         return None
-    if not 1 <= month <= 12:
+
+    if 1 <= code <= 12:
+        return f"{MONTH_NAMES[code - 1]}'{year_int % 100:02d}"
+    if code in QUARTER_NAMES:
+        return f"{QUARTER_NAMES[code]}'{year_int % 100:02d}"
+    if code == ANNUAL_PERIOD_CODE:
+        return str(year_int)
+    return None
+
+
+def _title_variants(title: str) -> tuple[str, ...]:
+    aliases = REPORT_TITLE_ALIASES.get(title, ())
+    return tuple(dict.fromkeys((title, *aliases)))
+
+
+def _form_matches(
+    value: Any,
+    wanted: Sequence[str],
+    item_names: dict[str, str],
+) -> bool:
+    """Сравнивает значение справочного поля Bitrix с набором названий.
+
+    Поле может быть строкой, списком или элементом инфоблока/справочника:
+    тогда Bitrix отдаёт ID, а название берём из метаданных поля.
+    """
+    if value is None:
+        return False
+    values = value if isinstance(value, (list, tuple)) else [value]
+    for raw in values:
+        raw_text = str(raw).strip()
+        if any(_same_simple(raw_text, title) for title in wanted):
+            return True
+        resolved = item_names.get(raw_text)
+        if resolved and any(_same_simple(resolved, title) for title in wanted):
+            return True
+    return False
+
+
+def _narrow_by_recipient(
+    report: Report,
+    candidates: list[dict[str, Any]],
+    context: BitrixContext,
+) -> list[dict[str, Any]] | None:
+    """Уточняет неоднозначную связь по получателю отчётности.
+
+    Возвращает None, если поле получателя не настроено или в Saby нет
+    данных получателя: тогда решение остаётся за оператором.
+    """
+    recipient_field = settings.bitrix.recipient_field
+    if not recipient_field or recipient_field not in context.fields:
         return None
-    return f"{MONTH_NAMES[month - 1]}'{year_int % 100:02d}"
+
+    wanted = tuple(
+        value
+        for value in (
+            report.recipient_name,
+            report.recipient_inn,
+            report.recipient_kpp,
+        )
+        if value
+    )
+    if not wanted:
+        return None
+
+    item_names = _field_item_names(context.fields.get(recipient_field) or {})
+    return [
+        item
+        for item in candidates
+        if _form_matches(item.get(recipient_field), wanted, item_names)
+    ]
+
+
+def _field_item_names(field: dict[str, Any]) -> dict[str, str]:
+    """Строит карту ID → название для enum/iblock-поля Bitrix."""
+    names: dict[str, str] = {}
+    for key in ("items", "enum", "list"):
+        items = field.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = _first_present(item, "ID", "id", "VALUE_ID", "valueId")
+            item_name = _first_present(item, "VALUE", "value", "NAME", "name")
+            if item_id is not None and item_name is not None:
+                names[str(item_id)] = str(item_name)
+    return names
+
+
+def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] is not None:
+            return mapping[key]
+    return None
 
 
 # ----------------------------------------------------------------------
@@ -475,6 +620,11 @@ async def process_reports(
             f"state={report.state_code} {report.state_name or ''}, "
             f"fact={_date_text(report.fact_date)}"
         )
+        key, key_reason = _match_key(report)
+        if key is not None:
+            print(f"  Ключ Bitrix: название={key[0]!r}, период={key[1]!r}")
+        elif key_reason:
+            print(f"  Ключ Bitrix: {key_reason}")
 
         try:
             item, reason = await _resolve_item(

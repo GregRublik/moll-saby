@@ -57,7 +57,13 @@ SABY_FIELDS = (
 )
 
 MAPPING_FIELDS = (
-    FieldSpec("form_field", "BITRIX_FORM_FIELD", "SABY_FORM", "Форма", "string"),
+    FieldSpec(
+        "form_field",
+        "BITRIX_FORM_FIELD",
+        "SABY_FORM",
+        "Название отчета",
+        "string",
+    ),
     FieldSpec("period_field", "BITRIX_PERIOD_FIELD", "SABY_PERIOD", "Период", "string"),
     FieldSpec(
         "recipient_field",

@@ -15,8 +15,10 @@ class BitrixSettings(BaseSettings):
     category_id: int = 118
 
     # Существующие поля карточки. Заполняются после проверки на портале.
+    # form_field — «Форма отчетности»: строка или элемент инфоблока 128,
+    # в котором хранится название отчёта (например, «6-НДФЛ»).
     form_field: str | None = None
-    period_field: str | None = None
+    period_field: str | None = None  # «Отчетный период», например «Июль'26»
     recipient_field: str | None = None
     fact_date_field: str = "ufCrm110_1785674534787"
 

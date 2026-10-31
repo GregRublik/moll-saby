@@ -66,6 +66,12 @@ class SabyEvent:
     kpp: str | None
     document: dict[str, Any] = field(repr=False)
     event: dict[str, Any] = field(repr=False)
+    # Получатель отчётности: конкретная ИФНС/СФР/Росстат. Нужен, чтобы
+    # различать отчёты с одинаковыми названием и периодом (например, 6-НДФЛ
+    # в разные инспекции).
+    recipient_name: str | None = None
+    recipient_inn: str | None = None
+    recipient_kpp: str | None = None
 
 
 class SabyService:
@@ -387,6 +393,7 @@ class SabyService:
         extension = document.get("Расширение") or {}
         state = document.get("Состояние") or {}
         organization = (document.get("НашаОрганизация") or {}).get("СвЮЛ") or {}
+        recipient = (document.get("Контрагент") or {}).get("СвЮЛ") or {}
         event_uuid = str(event.get("Идентификатор"))
 
         group = event.get("Группа") or {}
@@ -436,6 +443,9 @@ class SabyService:
             kpp=self._str_or_none(organization.get("КПП")),
             document=document,
             event=event,
+            recipient_name=self._str_or_none(recipient.get("Название")),
+            recipient_inn=self._str_or_none(recipient.get("ИНН")),
+            recipient_kpp=self._str_or_none(recipient.get("КПП")),
         )
 
     @classmethod
